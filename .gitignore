@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+outputs/
+reviewer-output/
+data/P01A/*
+!data/P01A/design.csv
+reports/P01A/*
+!reports/P01A/POD_SELECTION.json
+!reports/P01A/POD_VALIDATION.csv
+!reports/P01A/ENVIRONMENT.json
+05_models/
+*.mph
+*.zip
+.env

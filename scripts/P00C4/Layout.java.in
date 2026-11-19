@@ -1,0 +1,98 @@
+import com.comsol.model.*;
+import com.comsol.model.physics.*;
+import com.comsol.model.util.*;
+import java.util.*;
+
+public class Job {
+ static Model m; static ModelNode c; static MeshSequence mesh;
+ static String out="__OUT__/"; static double h=__BULK__, hw=__WELL__, hi=__STRIP__, cap=__CAP__;
+ static void mark(String k){System.out.println("C4_TIME "+k+" "+System.nanoTime());}
+ static void table(String name,String cols,double[][] rows) throws Exception {
+   var t=m.result().table().create("tbl"+name,"Table");t.set("tablebuffersize",Math.max(100,rows.length+1));t.setColumnHeaders(cols.split(","));t.setTableData(rows);t.save(out+name+".csv");
+ }
+ static void box(String tag,int dim,String xlo,String xhi,String ylo,String yhi){
+   var s=c.selection().create(tag,"Box");s.set("entitydim",dim);s.set("condition","inside");s.set("xmin",xlo);s.set("xmax",xhi);s.set("ymin",ylo);s.set("ymax",yhi);
+ }
+ static void geometry(){
+   c.geom().create("geom1",2);var g=c.geom("geom1");
+   for(String tag:new String[]{"coal","strip"}){
+      g.create(tag,"Rectangle");var f=g.feature(tag);
+      f.set("size",tag.equals("coal")?new String[]{"16","12"}:new String[]{"6.4","1.0"});
+      f.set("pos",tag.equals("coal")?new String[]{"-8","-6"}:new String[]{"-3.2","-0.5"});
+   }
+   g.create("un","Union");g.feature("un").selection("input").set("coal","strip");
+   for(int i=1;i<=2;i++){
+     String k="hole"+i,x=i==1?"-d/2":"d/2";
+     g.create(k,"Circle");g.feature(k).set("r","rw");g.feature(k).set("pos",new String[]{x,"0"});
+   }
+   g.create("diff","Difference");g.feature("diff").selection("input").set("un");g.feature("diff").selection("input2").set("hole1","hole2");g.run();
+   for(int i=1;i<=2;i++){
+     String x=i==1?"-d/2":"d/2";box("well"+i,1,x+"-rw-1e-6[m]",x+"+rw+1e-6[m]","-rw-1e-6[m]","rw+1e-6[m]");
+     if(c.selection("well"+i).entities().length!=4)throw new IllegalStateException("hole selection "+i);
+   }
+   box("bridge",2,"-3.20001","3.20001","-.50001",".50001");
+   if(c.selection("bridge").entities().length!=1)throw new IllegalStateException("strip selection");
+   box("left",1,"-8.00001","-7.99999","-6.00001","6.00001");
+   box("right",1,"7.99999","8.00001","-6.00001","6.00001");
+   box("bottom",1,"-8.00001","8.00001","-6.00001","-5.99999");
+   box("top",1,"-8.00001","8.00001","5.99999","6.00001");
+   var outer=c.selection().create("outer","Union");outer.set("entitydim",1);outer.set("input",new String[]{"left","right","top","bottom"});
+   if(outer.entities().length!=4)throw new IllegalStateException("outer selection");
+ }
+ static void meshing(){
+   c.mesh().create("mesh1");mesh=c.mesh("mesh1");mesh.create("tri","FreeTri");
+   var size=mesh.feature("size");size.set("custom","on");size.set("hmax",h+"[m]");size.set("hmin",hw/6+"[m]");size.set("hgrad",1.28);
+   for(String k:new String[]{"bridge","well1","well2"}){
+     var s=mesh.feature("tri").create("s"+k,"Size");s.selection().geom("geom1",k.equals("bridge")?2:1);s.selection().named(k);
+     s.set("custom","on");s.set("hmaxactive","on");s.set("hmax",(k.equals("bridge")?hi:hw)+"[m]");
+   }
+   mesh.run();
+ }
+ static void physics(){
+   var dl=c.physics().create("dl","PorousMediaFlowDarcy","geom1");
+   dl.prop("PhysicalModelProperty").set("dz","H");dl.prop("ShapeProperty").set("order_pressure",2);
+   dl.prop("ShapeProperty").set("boundaryFlux_pressure",true);dl.feature("gr1").set("g","0[m/s^2]");
+   var med=dl.feature("porous1");var fluid=med.feature("fluid1");var sk=med.feature("pm1");
+   fluid.set("rho_mat","userdef");fluid.set("rho","Cg*p");fluid.set("mu_mat","userdef");fluid.set("mu","mu0");
+   sk.set("epsilon_mat","userdef");sk.set("epsilon","ef");sk.set("kappa_mat","userdef");sk.set("kappa","perm");
+   dl.feature("init1").set("p","pf0");
+   for(int i=1;i<=2;i++){var b=dl.create("pressure"+i,"Pressure",1);b.selection().named("well"+i);b.set("p0","pw");}
+   var v=c.variable().create("v1");v.set("pmAbs","ym*1[MPa]");v.set("SfGas","ef*Cg*p");
+   v.set("SmGas","em*Cg*pmAbs+rb*rstd*VL*pmAbs/(PL+pmAbs)");v.set("CmGas","em*Cg+rb*rstd*VL*PL/(PL+pmAbs)^2");
+   v.set("GammaX","gamma_factor*(pmAbs-p)");
+   var mx=c.physics().create("cm","CoefficientFormPDE","geom1");mx.field("dimensionless").field("ym");mx.field("dimensionless").component(new String[]{"ym"});
+   var eq=mx.feature("cfeq1");eq.set("c","0");eq.set("a","0");eq.set("da","1[s/m^2]");eq.set("f","-1[s/m^2]*GammaX/(CmGas*1[MPa])");
+   mx.feature("init1").set("ym","pm0/1[MPa]");var ex=dl.create("exchange","MassSource",2);ex.selection().all();ex.set("Qm","GammaX");
+ }
+ static NumericalFeature integral(String tag,String reg,String... expressions){
+   var f=m.result().numerical().create(tag,reg==null?"IntSurface":"IntLine");if(reg==null)f.selection().all();else f.selection().named(reg);
+   f.set("expr",expressions);f.set("intorder",8);return f;
+ }
+ static void plots(){
+   for(String k:new String[]{"pmAbs","p"}){var pg=m.result().create("pg"+k,"PlotGroup2D");pg.label(k.equals("p")?"Fracture absolute pressure (Pa)":"Matrix absolute pressure (Pa)");
+     pg.create("surf","Surface");pg.feature("surf").set("expr",k);}
+ }
+ public static void main(String[] args) throws Exception {
+   mark("entered");m=ModelUtil.create("Layout");m.modelPath(out);m.label("P00C4 __CASE__ SYNTHETIC_LAYOUT_PROTOTYPE");
+   __PARAMS__
+   m.component().create("comp1",true);c=m.component("comp1");
+   geometry();mark("geometry");physics();mark("physics");meshing();mark("mesh");
+   double triangles=mesh.stat().getNumElem("tri"),vertices=mesh.stat().getNumVertex();
+   table("mesh","triangles,vertices,min_quality,avg_quality",new double[][]{{triangles,vertices,mesh.stat().getMinQuality(),mesh.stat().getMeanQuality()}});
+   if(4*vertices+2*triangles+2>200000)throw new IllegalStateException("estimated fine DOF bound");
+   if(__PRE__){System.out.println("C4_DONE");return;}
+   m.study().create("std1");m.study("std1").create("time","Transient");var study=m.study("std1").feature("time");
+   study.set("tlist","__TIMELIST__");study.set("rtol","__TOL__");m.study("std1").createAutoSequences("all");
+   var ts=m.sol("sol1").feature("t1");ts.set("maxstepconstraintbdf","const");ts.set("maxstepbdf",cap+"[s]");
+   ts.set("initialstepbdfactive","on");ts.set("initialstepbdf","1e-5[s]");ts.set("tout","tlist");ts.set("endtimeinterpolation",false);
+   mark("solve_start");m.sol("sol1").runAll();mark("solved");
+   var st=integral("stores",null,"1","H*SmGas","H*SfGas");double[][] sv=st.getReal();
+   double[][] flux=new double[5][];String gr="H*Cg*p*(dl.u*nx+dl.v*ny)";
+   for(int i=0;i<2;i++){flux[i]=integral("reaction"+(i+1),"well"+(i+1),"-reacf(p)").getReal()[0];
+     flux[i+2]=integral("gradient"+(i+1),"well"+(i+1),gr).getReal()[0];}
+   flux[4]=integral("outergrad","outer",gr).getReal()[0];var time=m.result().numerical().create("times","EvalGlobal");time.set("expr","t");double[] tt=time.getReal()[0];
+   double[][] rows=new double[tt.length][9];for(int i=0;i<tt.length;i++)rows[i]=new double[]{tt[i],sv[0][i],sv[1][i],sv[2][i],flux[0][i],flux[1][i],flux[2][i],flux[3][i],flux[4][i]};
+   plots();mark("post");table("balance","t_s,area_m2,mm_kg,mf_kg,q1_kg_s,q2_kg_s,g1_kg_s,g2_kg_s,gouter_kg_s",rows);
+   System.out.println("C2_DOF "+m.sol("sol1").getU().length);mark("Q_exported");mark("saved");__EXTRA__System.out.println("C4_DONE");
+ }
+}
